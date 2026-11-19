@@ -5,6 +5,6 @@
   "description": "Self-organizing mind map that fills itself with art",
   "type": "module",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node --disable-warning=ExperimentalWarning server.mjs"
   }
 }

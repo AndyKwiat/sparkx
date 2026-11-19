@@ -12,7 +12,7 @@ Type an idea, hit **Tab** for a child or **Enter** for a sibling, and keep going
 npm start            # → http://localhost:5178
 ```
 
-There's nothing to install beyond Node 18+. For better art, get a free [Pixabay API key](https://pixabay.com/api/docs/), then `cp .env.example .env` and paste it in. Without a key, Sparkx falls back to Wikimedia Commons and Openverse.
+There's nothing to install beyond Node 22+ (for its built-in SQLite). For better art, get a free [Pixabay API key](https://pixabay.com/api/docs/), then `cp .env.example .env` and paste it in. Without a key, Sparkx falls back to Wikimedia Commons and Openverse.
 
 ## Keys
 
@@ -24,6 +24,6 @@ Drag the background to pan, pinch to zoom, and drag an idea onto another to move
 
 - **Frontend:** plain HTML, CSS and JS modules. No framework and no build step.
 - **Art:** Iconify supplies the emoji-style stickers. A tiny local server ([server.mjs](server.mjs), zero dependencies) searches Pixabay for vector art. It keeps your key private and caches results and images on disk.
-- **Saving:** maps save to your browser automatically. Use Save/Open to export and import `.json` files.
+- **Saving:** every change autosaves to a SQLite database on the server (one map per signed-in user; `.data/sparkx.db` when running locally). Use Save/Open to export and import `.json` files.
 
 Desktop only, since it's built around a keyboard and a big screen.

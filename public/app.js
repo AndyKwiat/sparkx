@@ -42,7 +42,10 @@ function demoMap() {
   };
 }
 
-let map = load() || demoMap();
+// The map lives in the server's SQLite database (per signed-in user). localStorage is only a backup copy
+// for when the server can't be reached.
+const remote = await loadRemote();
+let map = remote || load() || demoMap();
 let prefs = { stickers: true, backdrops: true, density: 'medium', ...safeJson(localStorage.getItem(PREFS_KEY)) };
 let selectedId = map.root.id;
 let editing = null; // { id, original, isNew, snapshot }
@@ -66,13 +69,47 @@ function load() {
   const m = safeJson(localStorage.getItem(STORE_KEY));
   return m && m.root ? m : null;
 }
-let saveTimer;
+// resolves to the saved map, null if the server has none yet, or undefined if the server is unreachable
+async function loadRemote() {
+  try {
+    const r = await fetch('/api/map', { signal: AbortSignal.timeout(6000) });
+    if (!r.ok) return undefined;
+    const d = await r.json();
+    return d.map?.root ? d.map : null;
+  } catch { return undefined; }
+}
+
+let saveTimer = null;
+let saveChain = Promise.resolve();
 function save() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(map)); } catch {}
-  }, 300);
+  setSaveState('saving');
+  saveTimer = setTimeout(flushSave, 600);
 }
+function flushSave(leaving = false) {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  const body = JSON.stringify(map);
+  try { localStorage.setItem(STORE_KEY, body); } catch {}
+  // chain the requests so an older save can never land after a newer one
+  saveChain = saveChain.then(() =>
+    fetch('/api/map', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive: leaving && body.length < 60000 })
+      .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); if (!saveTimer) setSaveState('saved'); })
+      .catch((e) => { console.warn('save failed:', e); setSaveState('failed'); }));
+  return saveChain;
+}
+function setSaveState(s) {
+  const el = document.getElementById('saveState');
+  if (!el) return;
+  el.textContent = { saving: 'saving…', saved: '✓ saved', failed: '⚠ not saved — offline?' }[s];
+  el.classList.toggle('bad', s === 'failed');
+}
+addEventListener('pagehide', () => { if (saveTimer) flushSave(true); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && saveTimer) flushSave(true); });
+// first visit with the database: move whatever this browser had into it
+if (remote === null) save();
+else if (remote) setSaveState('saved');
+else setSaveState('failed');
 const savePrefs = () => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {} };
 
 // ---------------------------------------------------------------------------

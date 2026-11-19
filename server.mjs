@@ -7,10 +7,13 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite'; // works in Node 22+ and in Bun
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.resolve(process.env.STATIC_DIR || path.join(ROOT, 'public'));
-const CACHE_DIR = process.env.DATA_DIR ? path.join(process.env.DATA_DIR, 'cache') : path.join(ROOT, '.cache');
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : null; // set by radify in production
+const CACHE_DIR = DATA_DIR ? path.join(DATA_DIR, 'cache') : path.join(ROOT, '.cache');
+const DB_FILE = path.join(DATA_DIR || path.join(ROOT, '.data'), 'sparkx.db');
 const IMG_DIR = path.join(CACHE_DIR, 'img');
 const SEARCH_CACHE_FILE = path.join(CACHE_DIR, 'search-cache.json');
 const SEARCH_TTL_MS = 24 * 60 * 60 * 1000; // Pixabay asks for 24h caching of results
@@ -35,6 +38,57 @@ let saveTimer;
 function persistSearchCache() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => fsp.writeFile(SEARCH_CACHE_FILE, JSON.stringify(searchCache)).catch(() => {}), 1000);
+}
+
+// --- maps database (SQLite; radify backs up everything in $DATA_DIR) ----------
+fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
+const db = new DatabaseSync(DB_FILE);
+db.exec(`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 3000;
+  CREATE TABLE IF NOT EXISTS maps (
+    owner      TEXT PRIMARY KEY,   -- the signed-in email (X-Auth-Email), or 'local' when running on a laptop
+    data       TEXT NOT NULL,      -- the map as JSON
+    updated_at INTEGER NOT NULL    -- ms since epoch
+  );`);
+const getMap = db.prepare('SELECT data, updated_at FROM maps WHERE owner = ?');
+const putMap = db.prepare(`INSERT INTO maps (owner, data, updated_at) VALUES (?, ?, ?)
+  ON CONFLICT(owner) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`);
+
+// Who is this? Behind radify, Caddy sets X-Auth-Email after Google login (and strips any client-sent value).
+// Locally there is no login, so everything belongs to 'local'.
+function ownerOf(req) {
+  const email = String(req.headers['x-auth-email'] || '').trim().toLowerCase();
+  if (email) return email;
+  return DATA_DIR ? null : 'local';
+}
+
+const MAX_BODY = 5 * 1024 * 1024;
+async function readBody(req) {
+  let size = 0;
+  const chunks = [];
+  for await (const c of req) {
+    size += c.length;
+    if (size > MAX_BODY) throw Object.assign(new Error('too large'), { status: 413 });
+    chunks.push(c);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function handleMap(req, res) {
+  const owner = ownerOf(req);
+  if (!owner) return send(res, 401, 'not signed in');
+  if (req.method === 'GET') {
+    const row = getMap.get(owner);
+    return json(res, row ? { map: JSON.parse(row.data), updatedAt: row.updated_at } : { map: null });
+  }
+  if (req.method === 'PUT') {
+    let map;
+    try { map = JSON.parse(await readBody(req)); } catch (e) { return send(res, e.status || 400, e.status ? 'too large' : 'bad json'); }
+    if (!map?.root?.id) return send(res, 400, 'not a Sparkx map');
+    const now = Date.now();
+    putMap.run(owner, JSON.stringify(map), now);
+    return json(res, { updatedAt: now });
+  }
+  send(res, 405, 'method not allowed');
 }
 
 const MIME = {
@@ -165,6 +219,7 @@ const server = http.createServer(async (req, res) => {
       if (!q) return json(res, { results: [] });
       return json(res, await searchArt(q));
     }
+    if (url.pathname === '/api/map') return await handleMap(req, res);
     if (url.pathname === '/api/img') return serveImage(res, url.searchParams.get('u') || '');
 
     // static
