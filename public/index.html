@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sparkx — mind map</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600;700&family=Nunito:wght@600;700;800&display=swap" rel="stylesheet" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✨</text></svg>" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header id="toolbar">
+    <div class="brand"><span class="logo">✨</span> Spark<span>x</span></div>
+    <input id="title" spellcheck="false" aria-label="Map title" />
+    <div class="tools">
+      <button data-cmd="new" title="New map">＋ New</button>
+      <button data-cmd="import" title="Open a .json map">📂 Open</button>
+      <button data-cmd="export" title="Save map as .json">💾 Save</button>
+      <span class="sep"></span>
+      <button data-cmd="undo" title="Undo (⌘Z)">↶</button>
+      <button data-cmd="redo" title="Redo (⌘⇧Z)">↷</button>
+      <span class="sep"></span>
+      <button data-cmd="zoomOut" title="Zoom out">−</button>
+      <button data-cmd="fit" title="Fit map to screen">⤢ Fit</button>
+      <button data-cmd="zoomIn" title="Zoom in">＋</button>
+      <span class="sep"></span>
+      <button data-cmd="reroll" title="New art for selected idea (⌥I)">🎲 Art</button>
+      <button data-cmd="settings" title="Art settings">🎨</button>
+      <button data-cmd="help" title="Keyboard shortcuts">?</button>
+    </div>
+  </header>
+
+  <main id="stage">
+    <div id="world">
+      <div id="backdrops"></div>
+      <svg id="edges" width="1" height="1"></svg>
+      <div id="nodes"></div>
+    </div>
+    <div id="busy" hidden><span class="spinner"></span> <span id="busyText">finding art…</span></div>
+    <div id="hint">
+      <b>Enter</b> sibling · <b>Tab</b> child · <b>Space</b> edit · <b>Del</b> remove · <b>Arrows</b> move ·
+      <b>/</b> fold · <b>⌥I</b> new art · <b>⌥B</b> toggle backdrop · drag to pan / move ideas
+    </div>
+  </main>
+
+  <dialog id="settingsDlg">
+    <form method="dialog">
+      <h2>🎨 Art settings</h2>
+      <p id="sourceStatus" class="status"></p>
+      <label><input type="checkbox" id="prefStickers" /> Show sticker art beside ideas</label>
+      <label><input type="checkbox" id="prefBackdrops" /> Show translucent art behind ideas</label>
+      <label>Background art density
+        <select id="prefDensity">
+          <option value="low">Low — root &amp; main branches</option>
+          <option value="medium">Medium</option>
+          <option value="high">High — almost everything</option>
+        </select>
+      </label>
+      <details id="keyHelp">
+        <summary>How to add a Pixabay key (better vector art)</summary>
+        <ol>
+          <li>Create a free account at <a href="https://pixabay.com/accounts/join/" target="_blank" rel="noopener">pixabay.com</a>.</li>
+          <li>Open <a href="https://pixabay.com/api/docs/" target="_blank" rel="noopener">pixabay.com/api/docs</a> while logged in — your key is shown in the <code>key</code> parameter.</li>
+          <li>In the project folder, copy <code>.env.example</code> to <code>.env</code> and set <code>PIXABAY_KEY=…</code></li>
+          <li>Restart the server (<code>npm start</code>) and reload.</li>
+        </ol>
+      </details>
+      <div class="actions">
+        <button type="button" id="refreshAll">🔄 Re-fetch all art</button>
+        <button value="close" class="primary">Done</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="helpDlg">
+    <form method="dialog">
+      <h2>⌨️ Keyboard</h2>
+      <table>
+        <tr><td><kbd>Enter</kbd></td><td>Add sibling idea (finishes editing first)</td></tr>
+        <tr><td><kbd>Tab</kbd></td><td>Add child idea (works while editing too)</td></tr>
+        <tr><td><kbd>Space</kbd> / <kbd>F2</kbd> / double-click</td><td>Edit idea</td></tr>
+        <tr><td>Just start typing</td><td>Replace the idea's text</td></tr>
+        <tr><td><kbd>Shift</kbd>+<kbd>Enter</kbd></td><td>New line while editing</td></tr>
+        <tr><td><kbd>Esc</kbd></td><td>Cancel editing</td></tr>
+        <tr><td><kbd>Delete</kbd> / <kbd>Backspace</kbd></td><td>Remove idea and its children</td></tr>
+        <tr><td><kbd>←</kbd><kbd>→</kbd><kbd>↑</kbd><kbd>↓</kbd></td><td>Move selection</td></tr>
+        <tr><td><kbd>⌥</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd></td><td>Reorder idea among siblings</td></tr>
+        <tr><td><kbd>/</kbd></td><td>Fold / unfold children</td></tr>
+        <tr><td><kbd>⌥</kbd>+<kbd>I</kbd></td><td>Find different art for idea</td></tr>
+        <tr><td><kbd>⌥</kbd>+<kbd>B</kbd></td><td>Toggle background art for idea</td></tr>
+        <tr><td><kbd>⌘</kbd>+<kbd>Z</kbd> / <kbd>⌘</kbd>+<kbd>⇧</kbd>+<kbd>Z</kbd></td><td>Undo / redo</td></tr>
+        <tr><td>Scroll / drag background</td><td>Pan · pinch or <kbd>⌘</kbd>+scroll to zoom</td></tr>
+        <tr><td>Drag an idea</td><td>Drop on another idea to move it there</td></tr>
+      </table>
+      <div class="actions"><button value="close" class="primary">Got it</button></div>
+    </form>
+  </dialog>
+
+  <input type="file" id="fileInput" accept=".json,application/json" hidden />
+
+  <div id="desktopOnly">
+    <div>
+      <div class="big">✨🖥️</div>
+      <h1>Sparkx needs a desktop</h1>
+      <p>It's built around a keyboard and a big screen. Open it on a laptop or desktop browser.</p>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
