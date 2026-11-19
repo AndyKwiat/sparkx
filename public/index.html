@@ -17,8 +17,8 @@
     <span id="saveState" title="Where your map is saved"></span>
     <div class="tools">
       <button data-cmd="new" title="New map">＋ New</button>
-      <button data-cmd="import" title="Open a .json map">📂 Open</button>
-      <button data-cmd="export" title="Save map as .json">💾 Save</button>
+      <button data-cmd="open" title="Open one of your saved maps">📂 Open</button>
+      <button data-cmd="save" title="Save to your account (⌘S); after that it autosaves">💾 Save</button>
       <span class="sep"></span>
       <button data-cmd="undo" title="Undo (⌘Z)">↶</button>
       <button data-cmd="redo" title="Redo (⌘⇧Z)">↷</button>
@@ -99,7 +99,25 @@
     </form>
   </dialog>
 
-  <input type="file" id="fileInput" accept=".json,application/json" hidden />
+  <dialog id="nameDlg">
+    <form method="dialog">
+      <h2>✏️ Name your map</h2>
+      <p class="sub">Give it a name so you can find it again under 📂 Open.</p>
+      <input id="nameInput" class="name-input" required maxlength="200" placeholder="e.g. Trip to Japan" autocomplete="off" />
+      <div class="actions">
+        <button type="button" id="nameCancel">Cancel</button>
+        <button value="ok" class="primary">💾 Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="openDlg" class="wide">
+    <form method="dialog">
+      <h2>📂 Your maps</h2>
+      <div id="mapList" class="map-grid"></div>
+      <div class="actions"><button value="close">Close</button></div>
+    </form>
+  </dialog>
 
   <div id="desktopOnly">
     <div>

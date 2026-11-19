@@ -11,7 +11,7 @@ if (isMobile) document.body.classList.add('mobile');
 // Constants & state
 // ---------------------------------------------------------------------------
 const PALETTE = ['#ff5d73', '#ff9f1c', '#f7c22b', '#2ec4b6', '#3a86ff', '#8338ec', '#ff4fb4', '#2bb673', '#fb5607', '#00b4d8'];
-const STORE_KEY = 'sparkx.map.v1';
+const LAST_KEY = 'sparkx.lastMap'; // id of the last saved map this browser had open
 const PREFS_KEY = 'sparkx.prefs.v1';
 
 const $ = (s) => document.querySelector(s);
@@ -42,10 +42,18 @@ function demoMap() {
   };
 }
 
-// The map lives in the server's SQLite database (per signed-in user). localStorage is only a backup copy
-// for when the server can't be reached.
-const remote = await loadRemote();
-let map = remote || load() || demoMap();
+// Maps live in the server's SQLite database, many per signed-in user. A map is only stored once you hit Save;
+// from then on every change autosaves. `doc` is the open map's server identity (id null = not saved yet).
+let map = demoMap();
+let doc = { id: null, createdAt: null, updatedAt: null };
+try {
+  const last = localStorage.getItem(LAST_KEY);
+  if (last) {
+    const d = await api('GET', '/api/maps/' + encodeURIComponent(last));
+    map = d.map;
+    doc = { id: d.id, createdAt: d.createdAt, updatedAt: d.updatedAt };
+  }
+} catch { try { localStorage.removeItem(LAST_KEY); } catch {} }
 let prefs = { stickers: true, backdrops: true, density: 'medium', ...safeJson(localStorage.getItem(PREFS_KEY)) };
 let selectedId = map.root.id;
 let editing = null; // { id, original, isNew, snapshot }
@@ -65,51 +73,54 @@ let animating = false;
 let lastT = 0;
 
 function safeJson(s) { try { return JSON.parse(s) || {}; } catch { return {}; } }
-function load() {
-  const m = safeJson(localStorage.getItem(STORE_KEY));
-  return m && m.root ? m : null;
-}
-// resolves to the saved map, null if the server has none yet, or undefined if the server is unreachable
-async function loadRemote() {
-  try {
-    const r = await fetch('/api/map', { signal: AbortSignal.timeout(6000) });
-    if (!r.ok) return undefined;
-    const d = await r.json();
-    return d.map?.root ? d.map : null;
-  } catch { return undefined; }
+async function api(method, url, body, opts = {}) {
+  const r = await fetch(url, {
+    method, signal: AbortSignal.timeout(15000), ...opts,
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) throw new Error((await r.text().catch(() => '')) || 'HTTP ' + r.status);
+  return r.json();
 }
 
+// save() is called after every change. It only reaches the server once the map has been saved with the Save button.
 let saveTimer = null;
 let saveChain = Promise.resolve();
 function save() {
+  if (!doc.id) return;
   clearTimeout(saveTimer);
   setSaveState('saving');
-  saveTimer = setTimeout(flushSave, 600);
+  saveTimer = setTimeout(flushSave, 800);
 }
 function flushSave(leaving = false) {
   clearTimeout(saveTimer);
   saveTimer = null;
-  const body = JSON.stringify(map);
-  try { localStorage.setItem(STORE_KEY, body); } catch {}
+  const id = doc.id;
+  if (!id) return saveChain;
+  const body = JSON.stringify({ title: map.title, map, thumb: makeThumb() });
   // chain the requests so an older save can never land after a newer one
   saveChain = saveChain.then(() =>
-    fetch('/api/map', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive: leaving && body.length < 60000 })
-      .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); if (!saveTimer) setSaveState('saved'); })
+    fetch('/api/maps/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive: leaving && body.length < 60000 })
+      .then((r) => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then((d) => { if (doc.id === id) doc.updatedAt = d.updatedAt; if (!saveTimer) setSaveState('saved'); })
       .catch((e) => { console.warn('save failed:', e); setSaveState('failed'); }));
   return saveChain;
 }
-function setSaveState(s) {
+function setSaveState(s = doc.id ? 'saved' : 'unsaved') {
   const el = document.getElementById('saveState');
   if (!el) return;
-  el.textContent = { saving: 'saving…', saved: '✓ saved', failed: '⚠ not saved — offline?' }[s];
-  el.classList.toggle('bad', s === 'failed');
+  el.textContent = { unsaved: 'not saved', saving: 'saving…', saved: '✓ saved', failed: '⚠ not saved — offline?' }[s];
+  el.title = s === 'unsaved' ? 'This map only exists in this tab. Hit Save to keep it.' : 'Saved on the server; changes save automatically';
+  el.className = s;
 }
-addEventListener('pagehide', () => { if (saveTimer) flushSave(true); });
+// an unsaved map counts as worth keeping once you've edited it
+const hasUnsavedWork = () => !doc.id && undoStack.length > 0;
+addEventListener('beforeunload', (e) => {
+  if (saveTimer) flushSave(true);
+  if (hasUnsavedWork()) e.preventDefault();
+});
 document.addEventListener('visibilitychange', () => { if (document.hidden && saveTimer) flushSave(true); });
-// first visit with the database: move whatever this browser had into it
-if (remote === null) save();
-else if (remote) setSaveState('saved');
-else setSaveState('failed');
+
 const savePrefs = () => { try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch {} };
 
 // ---------------------------------------------------------------------------
@@ -741,7 +752,7 @@ document.addEventListener('keydown', (e) => {
 
   if (mod && e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if (mod && e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); return; }
-  if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); exportMap(); return; }
+  if (mod && e.key.toLowerCase() === 's') { e.preventDefault(); saveToServer(); return; }
   if (mod && (e.key === '=' || e.key === '+')) { e.preventDefault(); zoomBy(1.2); return; }
   if (mod && e.key === '-') { e.preventDefault(); zoomBy(1 / 1.2); return; }
   if (mod && e.key === '0') { e.preventDefault(); fit(); return; }
@@ -893,51 +904,238 @@ function flash(msg) {
   flashTimer = setTimeout(() => { b.hidden = true; b.classList.remove('msg'); }, 2200);
 }
 
-function exportMap() {
-  const blob = new Blob([JSON.stringify(map, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = (map.title || 'mindmap').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') + '.sparkx.json';
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+// ---- server maps: save, name prompt, open --------------------------------------
+const needsName = (t) => !t || /^untitled\b/i.test(t.trim());
+
+function askName() {
+  const dlg = $('#nameDlg');
+  const input = $('#nameInput');
+  const rootText = map.root.text.trim();
+  input.value = needsName(map.title) ? (rootText && rootText !== 'Central idea' ? rootText : '') : map.title;
+  input.setCustomValidity('');
+  dlg.returnValue = '';
+  dlg.showModal();
+  input.select();
+  return new Promise((resolve) => {
+    dlg.addEventListener('close', () => resolve(dlg.returnValue === 'ok' ? input.value.trim() : null), { once: true });
+  });
+}
+$('#nameCancel').addEventListener('click', () => $('#nameDlg').close('cancel'));
+$('#nameInput').addEventListener('input', (e) => {
+  e.target.setCustomValidity(needsName(e.target.value) ? 'Give your map a real name' : '');
+});
+
+async function saveToServer() {
+  if (editing) commitEdit();
+  if (doc.id) { await flushSave(); flash('Saved'); return; }
+  if (needsName(map.title)) {
+    const name = await askName();
+    if (!name) return;
+    map.title = name;
+    titleInput.value = name;
+  }
+  setSaveState('saving');
+  try {
+    const d = await api('POST', '/api/maps', { title: map.title, map, thumb: makeThumb() });
+    doc = { id: d.id, createdAt: d.createdAt, updatedAt: d.updatedAt };
+    try { localStorage.setItem(LAST_KEY, d.id); } catch {}
+    setSaveState('saved');
+    flash('Saved — changes now save automatically');
+  } catch (e) {
+    setSaveState('unsaved');
+    alert('Could not save: ' + e.message);
+  }
 }
 
-$('#fileInput').addEventListener('change', async (e) => {
-  const f = e.target.files[0];
-  e.target.value = '';
-  if (!f) return;
+async function confirmLeave() {
+  if (editing) commitEdit();
+  if (hasUnsavedWork() && !confirm('This map isn\'t saved yet. Discard it?')) return false;
+  if (saveTimer) await flushSave();
+  return true;
+}
+
+// swap in another map (from the server, or a fresh unsaved one)
+function loadDoc(m, d) {
+  map = m;
+  doc = d;
+  undoStack.length = redoStack.length = 0;
+  failedArt.clear();
+  selectedId = map.root.id;
+  titleInput.value = map.title || '';
+  try { d.id ? localStorage.setItem(LAST_KEY, d.id) : localStorage.removeItem(LAST_KEY); } catch {}
+  setSaveState();
+  resetView();
+}
+
+async function openMap(id) {
+  if (id === doc.id) return $('#openDlg').close();
+  if (!(await confirmLeave())) return;
   try {
-    const d = JSON.parse(await f.text());
-    if (!d.root?.id) throw new Error('not a Sparkx map');
-    pushUndo();
-    map = d;
-    selectedId = map.root.id;
-    $('#title').value = map.title || '';
-    resetView();
-  } catch (err) { alert('Could not open that file: ' + err.message); }
-});
+    const d = await api('GET', '/api/maps/' + id);
+    $('#openDlg').close();
+    loadDoc(d.map, { id: d.id, createdAt: d.createdAt, updatedAt: d.updatedAt });
+  } catch (e) { alert('Could not open that map: ' + e.message); }
+}
+
+const fmtDate = (t) => new Date(t).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+function relTime(t) {
+  const s = (Date.now() - t) / 1000;
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.round(s / 60) + ' min ago';
+  if (s < 86400) return Math.round(s / 3600) + ' h ago';
+  if (s < 7 * 86400) return Math.round(s / 86400) + ' d ago';
+  return new Date(t).toLocaleDateString(undefined, { dateStyle: 'medium' });
+}
+
+async function showOpenDialog() {
+  if (editing) commitEdit();
+  if (saveTimer) flushSave();
+  const list = $('#mapList');
+  list.innerHTML = '<p class="empty">Loading your maps…</p>';
+  $('#openDlg').showModal();
+  let maps;
+  try { maps = await api('GET', '/api/maps'); } catch (e) {
+    list.innerHTML = '';
+    list.append(Object.assign(document.createElement('p'), { className: 'empty', textContent: 'Could not load your maps: ' + e.message }));
+    return;
+  }
+  list.replaceChildren();
+  if (!maps.length) {
+    list.innerHTML = '<p class="empty">No saved maps yet. Hit <b>💾 Save</b> to keep the one you\'re working on.</p>';
+    return;
+  }
+  for (const m of maps) {
+    const card = document.createElement('div');
+    card.className = 'map-card' + (m.id === doc.id ? ' current' : '');
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'open-map';
+    const thumb = document.createElement('div');
+    thumb.className = 'thumb';
+    if (m.thumb) thumb.append(thumbSvg(m.thumb));
+    const title = Object.assign(document.createElement('div'), { className: 'map-title', textContent: m.title });
+    const dates = document.createElement('div');
+    dates.className = 'map-dates';
+    const created = Object.assign(document.createElement('span'), { textContent: 'Created ' + new Date(m.createdAt).toLocaleDateString(undefined, { dateStyle: 'medium' }), title: fmtDate(m.createdAt) });
+    const modified = Object.assign(document.createElement('span'), { textContent: 'Modified ' + relTime(m.updatedAt), title: fmtDate(m.updatedAt) });
+    dates.append(created, modified);
+    open.append(thumb, title, dates);
+    open.addEventListener('click', () => openMap(m.id));
+    const del = Object.assign(document.createElement('button'), { type: 'button', className: 'del', textContent: '🗑', title: 'Delete this map' });
+    del.addEventListener('click', async () => {
+      if (!confirm(`Delete "${m.title}"? This can't be undone.`)) return;
+      try {
+        await api('DELETE', '/api/maps/' + m.id);
+        card.remove();
+        if (m.id === doc.id) { clearTimeout(saveTimer); saveTimer = null; doc = { id: null, createdAt: null, updatedAt: null }; try { localStorage.removeItem(LAST_KEY); } catch {} setSaveState(); }
+        if (!list.children.length) showOpenDialog();
+      } catch (e) { alert('Could not delete: ' + e.message); }
+    });
+    card.append(open, del);
+    list.append(card);
+  }
+}
+
+// ---- thumbnails: a tiny vector sketch of the laid-out map (boxes, branches, art) ----
+const THUMB_W = 320, THUMB_H = 200;
+function makeThumb() {
+  const items = [];
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const grow = (l, t, r, b) => { x0 = Math.min(x0, l); y0 = Math.min(y0, t); x1 = Math.max(x1, r); y1 = Math.max(y1, b); };
+  for (const [id, el] of els) {
+    const t = targets.get(id);
+    if (!t || !el.w) continue;
+    items.push({ id, el, x: t.x, y: t.y, dir: t.dir || 1 });
+    grow(t.x - el.w / 2, t.y - el.h / 2 - (el.ss || 0) * 0.8, t.x + el.w / 2, t.y + el.h / 2);
+  }
+  if (!items.length) return null;
+  const pad = 10;
+  const k = Math.min((THUMB_W - pad * 2) / (x1 - x0), (THUMB_H - pad * 2) / (y1 - y0), 0.6);
+  const ox = (THUMB_W - (x1 - x0) * k) / 2, oy = (THUMB_H - (y1 - y0) * k) / 2;
+  const X = (x) => Math.round(((x - x0) * k + ox) * 10) / 10;
+  const Y = (y) => Math.round(((y - y0) * k + oy) * 10) / 10;
+  const S = (v) => Math.round(v * k * 10) / 10;
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const okUrl = (u) => typeof u === 'string' && (u.startsWith('/api/img?') || u.startsWith('https://'));
+  const th = { w: THUMB_W, h: THUMB_H, b: [], e: [], n: [], s: [] };
+  for (const { id, el, x, y, dir } of items) {
+    const color = el.depth === 0 ? '#8338ec' : el.slot.style.getPropertyValue('--c') || '#8338ec';
+    if (el.bdUrl && el.depth <= 1 && okUrl(el.bdUrl)) {
+      const s = el.bdSize * 0.8;
+      const off = el.depth === 0 ? 0 : dir * el.w * 0.22;
+      th.b.push([el.bdUrl, X(x + off - s / 2), Y(y - s / 2), S(s)]);
+    }
+    const p = info(id)?.parent;
+    const pi = p && byId.get(p.id);
+    if (pi) {
+      const sx = pi.x + dir * (pi.el.depth === 0 ? pi.el.w * 0.32 : pi.el.w / 2 - 4);
+      const ex = x - dir * (el.w / 2 - 6);
+      th.e.push([X(sx), Y(pi.y), X(ex), Y(y), color, el.depth === 1 ? 2.5 : 1.5]);
+    }
+    th.n.push([X(x - el.w / 2), Y(y - el.h / 2), S(el.w), S(el.h), color, el.depth, (info(id)?.node.text || '').slice(0, 40)]);
+    if (el.stickerUrl && el.ss && th.s.length < 30 && okUrl(el.stickerUrl)) {
+      const s = el.ss;
+      const left = el.depth === 0 ? x - s / 2 : dir < 0 ? x - el.w / 2 - s * 0.42 : x + el.w / 2 + s * 0.42 - s;
+      th.s.push([el.stickerUrl, X(left), Y(y - el.h / 2 - s * 0.8), S(s)]);
+    }
+  }
+  return th;
+}
+
+function thumbSvg(th) {
+  const mk = (tag, attrs) => {
+    const e = document.createElementNS(SVGNS, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    return e;
+  };
+  const svg = mk('svg', { viewBox: `0 0 ${th.w} ${th.h}`, preserveAspectRatio: 'xMidYMid meet' });
+  const img = ([href, x, y, s], extra = {}) => {
+    if (typeof href !== 'string' || !(href.startsWith('/api/img?') || href.startsWith('https://'))) return;
+    svg.append(mk('image', { href, x, y, width: s, height: s, preserveAspectRatio: 'xMidYMid meet', ...extra }));
+  };
+  for (const b of th.b || []) img(b, { opacity: 0.22 });
+  for (const [sx, sy, ex, ey, c, w] of th.e || []) {
+    const mx = (sx + ex) / 2;
+    svg.append(mk('path', { d: `M${sx},${sy} C${mx},${sy} ${mx},${ey} ${ex},${ey}`, fill: 'none', stroke: c, 'stroke-width': w, 'stroke-linecap': 'round' }));
+  }
+  for (const [x, y, w, h, c, depth, label] of th.n || []) {
+    svg.append(mk('rect', {
+      x, y, width: w, height: h, rx: Math.min(h / 2, depth === 0 ? 8 : 5),
+      fill: depth <= 1 ? c : '#fff', stroke: c, 'stroke-width': depth <= 1 ? 0 : 1,
+    }));
+    const text = String(label || '').split('\n')[0];
+    const size = Math.min(h * 0.5, (w * 0.9) / Math.max(1, text.length * 0.56));
+    if (text && size >= 3) {
+      const t = mk('text', {
+        x: x + w / 2, y: y + h / 2, 'font-size': size.toFixed(1), 'text-anchor': 'middle', 'dominant-baseline': 'central',
+        'font-family': depth === 0 ? 'Fredoka, sans-serif' : 'Nunito, sans-serif', 'font-weight': 700,
+        fill: depth <= 1 ? '#fff' : '#2a2350',
+      });
+      t.textContent = text;
+      svg.append(t);
+    }
+  }
+  for (const s of th.s || []) img(s);
+  return svg;
+}
 
 function resetView() {
   for (const el of els.values()) { el.slot.remove(); el.edge.remove(); el.bd.remove(); }
   els.clear();
   render();
-  save();
   requestAnimationFrame(fit);
 }
 
 const commands = {
-  new() {
-    pushUndo();
-    map = { title: 'Untitled map', root: node('Central idea') };
-    selectedId = map.root.id;
-    $('#title').value = map.title;
-    resetView();
+  async new() {
+    if (!(await confirmLeave())) return;
+    loadDoc({ title: 'Untitled map', root: node('Central idea') }, { id: null, createdAt: null, updatedAt: null });
     camT.x = camT.y = 0; camT.z = 1;
     requestAnimationFrame(() => startEdit(map.root.id, 'select'));
-    flash('New map — ⌘Z brings the old one back');
+    flash('New map — hit Save when you want to keep it');
   },
-  import() { $('#fileInput').click(); },
-  export: exportMap,
+  open: showOpenDialog,
+  save: saveToServer,
   undo, redo, fit,
   zoomIn: () => zoomBy(1.2),
   zoomOut: () => zoomBy(1 / 1.2),
@@ -978,6 +1176,7 @@ $('#refreshAll').addEventListener('click', () => {
 
 const titleInput = $('#title');
 titleInput.value = map.title || '';
+setSaveState();
 titleInput.addEventListener('input', () => { map.title = titleInput.value; save(); });
 titleInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === 'Escape') titleInput.blur(); });
 

@@ -24,6 +24,6 @@ Drag the background to pan, pinch to zoom, and drag an idea onto another to move
 
 - **Frontend:** plain HTML, CSS and JS modules. No framework and no build step.
 - **Art:** Iconify supplies the emoji-style stickers. A tiny local server ([server.mjs](server.mjs), zero dependencies) searches Pixabay for vector art. It keeps your key private and caches results and images on disk.
-- **Saving:** every change autosaves to a SQLite database on the server (one map per signed-in user; `.data/sparkx.db` when running locally). Use Save/Open to export and import `.json` files.
+- **Saving:** hit **💾 Save** (⌘S) to keep a map on the server; from then on it autosaves. **📂 Open** lists all your maps with thumbnails. Maps live in SQLite, separately for each signed-in user (`.data/sparkx.db` when running locally).
 
 Desktop only, since it's built around a keyboard and a big screen.

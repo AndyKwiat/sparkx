@@ -44,14 +44,25 @@ function persistSearchCache() {
 fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
 const db = new DatabaseSync(DB_FILE);
 db.exec(`PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 3000;
-  CREATE TABLE IF NOT EXISTS maps (
-    owner      TEXT PRIMARY KEY,   -- the signed-in email (X-Auth-Email), or 'local' when running on a laptop
+  CREATE TABLE IF NOT EXISTS saved_maps (
+    id         TEXT PRIMARY KEY,
+    owner      TEXT NOT NULL,      -- the signed-in email (X-Auth-Email), or 'local' when running on a laptop
+    title      TEXT NOT NULL,
     data       TEXT NOT NULL,      -- the map as JSON
-    updated_at INTEGER NOT NULL    -- ms since epoch
-  );`);
-const getMap = db.prepare('SELECT data, updated_at FROM maps WHERE owner = ?');
-const putMap = db.prepare(`INSERT INTO maps (owner, data, updated_at) VALUES (?, ?, ?)
-  ON CONFLICT(owner) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at`);
+    thumb      TEXT,               -- small vector preview (JSON of boxes, lines and image urls)
+    created_at INTEGER NOT NULL,   -- ms since epoch
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS saved_maps_owner ON saved_maps (owner, updated_at DESC);`);
+// the first version kept one map per user in "maps"; it's not used any more
+db.exec('DROP TABLE IF EXISTS maps');
+const q = {
+  list: db.prepare('SELECT id, title, thumb, created_at, updated_at FROM saved_maps WHERE owner = ? ORDER BY updated_at DESC'),
+  get: db.prepare('SELECT id, title, data, created_at, updated_at FROM saved_maps WHERE id = ? AND owner = ?'),
+  insert: db.prepare('INSERT INTO saved_maps (id, owner, title, data, thumb, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)'),
+  update: db.prepare('UPDATE saved_maps SET title = ?, data = ?, thumb = ?, updated_at = ? WHERE id = ? AND owner = ?'),
+  del: db.prepare('DELETE FROM saved_maps WHERE id = ? AND owner = ?'),
+};
 
 // Who is this? Behind radify, Caddy sets X-Auth-Email after Google login (and strips any client-sent value).
 // Locally there is no login, so everything belongs to 'local'.
@@ -73,20 +84,47 @@ async function readBody(req) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-async function handleMap(req, res) {
+// body: { title, map, thumb }
+async function readMapBody(req) {
+  const d = JSON.parse(await readBody(req));
+  if (!d?.map?.root?.id) throw Object.assign(new Error('not a Sparkx map'), { status: 400 });
+  const title = String(d.title || d.map.title || '').trim().slice(0, 200) || 'Untitled map';
+  const thumb = d.thumb ? JSON.stringify(d.thumb).slice(0, 200000) : null;
+  return { title, data: JSON.stringify(d.map), thumb };
+}
+
+// /api/maps            GET list · POST create
+// /api/maps/<id>       GET one · PUT update · DELETE
+async function handleMaps(req, res, id) {
   const owner = ownerOf(req);
   if (!owner) return send(res, 401, 'not signed in');
-  if (req.method === 'GET') {
-    const row = getMap.get(owner);
-    return json(res, row ? { map: JSON.parse(row.data), updatedAt: row.updated_at } : { map: null });
+  const m = req.method;
+  if (!id && m === 'GET') {
+    return json(res, q.list.all(owner).map((r) => ({
+      id: r.id, title: r.title, thumb: r.thumb ? JSON.parse(r.thumb) : null, createdAt: r.created_at, updatedAt: r.updated_at,
+    })));
   }
-  if (req.method === 'PUT') {
-    let map;
-    try { map = JSON.parse(await readBody(req)); } catch (e) { return send(res, e.status || 400, e.status ? 'too large' : 'bad json'); }
-    if (!map?.root?.id) return send(res, 400, 'not a Sparkx map');
+  if (!id && m === 'POST') {
+    const b = await readMapBody(req);
     const now = Date.now();
-    putMap.run(owner, JSON.stringify(map), now);
+    const newId = crypto.randomBytes(9).toString('base64url');
+    q.insert.run(newId, owner, b.title, b.data, b.thumb, now, now);
+    return json(res, { id: newId, createdAt: now, updatedAt: now });
+  }
+  if (id && m === 'GET') {
+    const r = q.get.get(id, owner);
+    if (!r) return send(res, 404, 'no such map');
+    return json(res, { id: r.id, title: r.title, map: JSON.parse(r.data), createdAt: r.created_at, updatedAt: r.updated_at });
+  }
+  if (id && m === 'PUT') {
+    const b = await readMapBody(req);
+    const now = Date.now();
+    if (!q.update.run(b.title, b.data, b.thumb, now, id, owner).changes) return send(res, 404, 'no such map');
     return json(res, { updatedAt: now });
+  }
+  if (id && m === 'DELETE') {
+    if (!q.del.run(id, owner).changes) return send(res, 404, 'no such map');
+    return json(res, { ok: true });
   }
   send(res, 405, 'method not allowed');
 }
@@ -219,7 +257,8 @@ const server = http.createServer(async (req, res) => {
       if (!q) return json(res, { results: [] });
       return json(res, await searchArt(q));
     }
-    if (url.pathname === '/api/map') return await handleMap(req, res);
+    const mm = url.pathname.match(/^\/api\/maps(?:\/([\w-]{1,40}))?\/?$/);
+    if (mm) return await handleMaps(req, res, mm[1]);
     if (url.pathname === '/api/img') return serveImage(res, url.searchParams.get('u') || '');
 
     // static
@@ -232,6 +271,8 @@ const server = http.createServer(async (req, res) => {
     res.end(buf);
   } catch (e) {
     if (e.code === 'ENOENT') return send(res, 404, 'not found');
+    if (e instanceof SyntaxError) return send(res, 400, 'bad json');
+    if (e.status) return send(res, e.status, e.message);
     console.error(e);
     send(res, 500, 'server error');
   }
